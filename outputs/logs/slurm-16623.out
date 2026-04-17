@@ -1,0 +1,3 @@
+/users/adhp492/neuralComputingHPC/creditcard.csv already exists (150.8 MB). Use --force to re-download.
+Verified: 150.8 MB, 284807 rows, header OK.
+CPU job complete. Artifacts in outputs/ and models/.
