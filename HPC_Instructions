@@ -1,0 +1,121 @@
+Transform the code of this neural computing / machine learning project so it runs correctly on a university Linux HPC cluster with GPU nodes, while preserving the ability to run it locally (Windows, macOS, or Linux). Do not rewrite working code — add HPC-compatible infrastructure around it, and patch only what is genuinely broken for HPC use.
+
+Assume the user already knows how to:
+- SSH into the cluster.
+- Clone the repo and create a Python virtualenv.
+- Install `requirements.txt` and load any required system modules.
+- Transfer data files to the cluster.
+
+Your job is to produce the **code changes** and **job submission scripts** needed, not environment bootstrapping.
+
+## Step 1 — Audit first, then act
+
+Before writing any code, produce a short audit of the project that identifies:
+
+1. **Framework and compute profile**: PyTorch / TensorFlow / scikit-learn / JAX? GPU-bound, CPU-bound, or mixed? Approximate training time and memory footprint per model.
+2. **Entry points**: which scripts or notebooks actually produce trained artifacts? (e.g. `src/mlp_train.py`, `src/svm_train.py`, notebooks run top-to-bottom).
+3. **Hardcoded assumptions that will break on HPC**:
+   - Windows path separators or `C:\Users\...` paths embedded in saved artifacts or notebooks.
+   - `matplotlib` without a non-interactive backend (crashes on headless nodes).
+   - `device='cuda'` hardcoded without a CPU fallback, or `device='cpu'` hardcoded.
+   - `n_jobs=-1` in scikit-learn when a SLURM job requested a specific `--cpus-per-task` (grabs all node cores, not just allocated ones).
+   - `num_workers > 0` in DataLoader without guarding for fork safety.
+   - `os.cpu_count()` returning the node's full CPU count rather than SLURM's allocation.
+   - Interactive `tqdm` bars that spam log files.
+   - Package version mismatches between saved joblib / torch artifacts and the likely HPC environment (the `InconsistentVersionWarning` class of problems).
+4. **Scheduler compatibility**: if existing job scripts exist, are they SLURM / PBS / SGE? If none exist, default to SLURM but ask if you're unsure.
+
+Present the audit as a numbered list before generating any files. Wait for confirmation if the audit reveals major structural issues; otherwise proceed to Step 2.
+
+## Step 2 — Add job submission scripts (additive, not destructive)
+
+Create `scripts/hpc/` with one SLURM script per training entry point. Each script must:
+
+- Include `#SBATCH` directives for job name, output/error log paths (`outputs/logs/slurm-%j.out`), wall-clock time, CPU count, memory, and GPU count (only for GPU jobs).
+- Default to conservative resource requests that will queue quickly:
+  - GPU jobs: 1 GPU + 4 CPUs + 16 GB RAM + 2 hours.
+  - CPU-parallel jobs (e.g. SVM grid search, joblib-parallel): 16 CPUs + 16 GB RAM + 4 hours.
+- Assume the virtualenv is already created and activated by the user (`source venv/bin/activate` before `sbatch`), OR include a commented `# source venv/bin/activate` line the user can uncomment if they prefer the script to activate it.
+- Export `PYTHONUNBUFFERED=1` so logs stream in real time rather than buffering.
+- Export `MPLBACKEND=Agg` for headless matplotlib safety.
+- Run the training script with CLI args that the Python script already accepts — no magic wrappers.
+- Include at the top:
+```bash
+  # Submit with: sbatch scripts/hpc/run_<model>.slurm
+  # Monitor with: squeue -u $USER
+  # Tail logs:   tail -f outputs/logs/slurm-<jobid>.out
+  # Cancel with: scancel <jobid>
+```
+- Create any output directories the job needs (`mkdir -p outputs/logs outputs/figures models`) before the Python call, so SLURM log redirection and artifact saves don't fail silently.
+
+Generate PBS/Torque (`.pbs`) equivalents only if the audit established the cluster uses PBS.
+
+Also generate a `scripts/hpc/run_local.sh` plain-bash fallback that calls the same Python scripts directly, for clusters without a scheduler or for interactive debugging sessions (`srun --gres=gpu:1 --pty bash`).
+
+## Step 3 — Patch existing code (minimal, surgical)
+
+Only modify existing files for these specific issues:
+
+1. **Device detection** — replace any hardcoded `'cuda'` or `'cpu'` with a single helper used throughout:
+```python
+   def get_device() -> torch.device:
+       return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+```
+   Call once at script startup, pass the device explicitly thereafter.
+
+2. **Matplotlib backend** — at the top of any script that saves figures but may run headless:
+```python
+   import os
+   import matplotlib
+   if not os.environ.get('DISPLAY') and os.environ.get('MPLBACKEND') != 'Agg':
+       matplotlib.use('Agg')
+```
+   For notebooks, add a one-line README note that they need a Jupyter kernel on the HPC (or should be run locally after `rsync`ing results back) — don't modify notebook cells.
+
+3. **SLURM-aware CPU count** — for `n_jobs` in scikit-learn and `num_workers` in DataLoader:
+```python
+   def get_cpu_count() -> int:
+       # Respect SLURM allocation if present, else fall back to os.cpu_count().
+       return int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count() or 1))
+```
+   Replace `n_jobs=-1` with `n_jobs=get_cpu_count()`.
+
+4. **Path handling** — replace any Windows-style paths (`C:\\...`) or strings that assume the current working directory with `pathlib.Path` resolved relative to the script's location or a project-root sentinel (`.git`, `pyproject.toml`, or a dedicated `.project-root` file).
+
+5. **Version-pinned requirements.txt** — if the audit found joblib / torch / sklearn artifacts saved with a specific version, pin that version (or a tight compatible range) so the HPC environment can deserialise them without the `InconsistentVersionWarning`. Add a short comment next to each pin explaining why.
+
+6. **PyTorch install hint in requirements.txt** — add a commented block at the top explaining that PyTorch should be installed via the official wheel matching the cluster's CUDA version, before the rest of the file:
+```
+   # Install PyTorch matching the cluster's CUDA version first:
+   # pip install torch --index-url https://download.pytorch.org/whl/cu118  # CUDA 11.8
+   # pip install torch --index-url https://download.pytorch.org/whl/cu121  # CUDA 12.1
+   # Then: pip install -r requirements.txt
+```
+
+7. **tqdm quieting** — if `tqdm` is used in training loops, wrap calls with a `disable=not sys.stdout.isatty()` so progress bars don't flood SLURM log files with carriage-return noise. Keep the progress bar active for local interactive runs.
+
+## Step 4 — Do NOT modify
+
+- Working training logic, loss functions, evaluation metrics, model architectures.
+- The `test.ipynb` or equivalent reproducibility notebook (markers may run this).
+- Existing local-run scripts if they work.
+- Notebook output cells — leave saved outputs intact.
+- `.gitignore`, CI configs, or docs unrelated to HPC.
+- Anything environment-related: virtualenv setup, `pip install` commands, `module load` wrappers, data download scripts. The user handles this themselves.
+
+## Step 5 — Update the README (minimal addition)
+
+Add a single new section called **"Submitting to HPC"** (do not replace existing sections) that covers only:
+1. Submitting jobs: `sbatch scripts/hpc/run_<model>.slurm`.
+2. Monitoring: `squeue -u $USER`, `tail -f outputs/logs/slurm-<jobid>.out`.
+3. Cancelling: `scancel <jobid>`.
+4. A short troubleshooting list of the four most likely job failures and the one-line fix for each (CUDA mismatch, OOM-killed, time-limit hit, wrong scheduler directives).
+
+Leave everything else in the README alone.
+
+## Deliverable
+
+1. The audit (Step 1) as a numbered markdown list.
+2. Every new file created, fully written out (no placeholders).
+3. Every modified file shown as a unified diff or clearly marked before/after, touching only the specific lines that needed patching.
+4. A final list grouped as: **Created** / **Modified** / **Unchanged but reviewed**, so I can review and commit each change independently.

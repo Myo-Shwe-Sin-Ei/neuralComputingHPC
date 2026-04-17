@@ -1,0 +1,18 @@
+# Install PyTorch matching the cluster's CUDA version FIRST:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118   # CUDA 11.8
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121   # CUDA 12.1
+# CPU-only: pip install torch
+# Then install the rest:
+#   pip install -r requirements.txt
+
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+imbalanced-learn==0.12.3
+torch==2.2.2
+matplotlib==3.8.4
+seaborn==0.13.2
+joblib==1.4.2
+jupyter==1.0.0
+nbformat==5.10.4
+tqdm==4.66.4
