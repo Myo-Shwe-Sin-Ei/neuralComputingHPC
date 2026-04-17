@@ -10,6 +10,7 @@
 #SBATCH --job-name=neco_svm
 #SBATCH --output=outputs/logs/slurm-%j.out
 #SBATCH --error=outputs/logs/slurm-%j.err
+#SBATCH --partition=normal
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=16G
